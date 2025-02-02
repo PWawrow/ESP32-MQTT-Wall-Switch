@@ -27,12 +27,12 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "mqtt_client.h"
-
 #include "protocol_examples_common.h"
 #include "esp_wifi.h"
-
-
 #include "esp_lcd_gc9a01.h"
+
+
+#include "mqtt_api.h"
 static const char *TAG = "MQTT WALL SWITCH";
 static const char *TOUCH_TAG = "Touch";
 #pragma region DisplayDefines
@@ -44,32 +44,32 @@ static const char *TOUCH_TAG = "Touch";
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Please update the following configuration according to your LCD spec //////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (20 * 1000 * 1000)
-#define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
-#define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_SCLK           18
-#define EXAMPLE_PIN_NUM_MOSI           23
-#define EXAMPLE_PIN_NUM_MISO           21
-#define EXAMPLE_PIN_NUM_LCD_DC         26
-#define EXAMPLE_PIN_NUM_LCD_RST        25
-#define EXAMPLE_PIN_NUM_LCD_CS         5
-#define EXAMPLE_PIN_NUM_BK_LIGHT       22
-#define EXAMPLE_PIN_NUM_TOUCH_CS       5
+#define LCD_PIXEL_CLOCK_HZ     (20 * 1000 * 1000)
+#define LCD_BK_LIGHT_ON_LEVEL  1
+#define LCD_BK_LIGHT_OFF_LEVEL !LCD_BK_LIGHT_ON_LEVEL
+#define PIN_NUM_SCLK           18
+#define PIN_NUM_MOSI           23
+#define PIN_NUM_MISO           21
+#define PIN_NUM_LCD_DC         26
+#define PIN_NUM_LCD_RST        25
+#define PIN_NUM_LCD_CS         5
+#define PIN_NUM_BK_LIGHT       22
+#define PIN_NUM_TOUCH_CS       5
 
 
-#define EXAMPLE_LCD_H_RES              240
-#define EXAMPLE_LCD_V_RES              240
+#define LCD_H_RES              240
+#define LCD_V_RES              240
 
 // Bit number used to represent command and parameter
-#define EXAMPLE_LCD_CMD_BITS           8
-#define EXAMPLE_LCD_PARAM_BITS         8
+#define LCD_CMD_BITS           8
+#define LCD_PARAM_BITS         8
 
-#define EXAMPLE_LVGL_DRAW_BUF_LINES    20 // number of display lines in each draw buffer
-#define EXAMPLE_LVGL_TICK_PERIOD_MS    2
-#define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
-#define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1
-#define EXAMPLE_LVGL_TASK_STACK_SIZE   (4 * 1024)
-#define EXAMPLE_LVGL_TASK_PRIORITY     2
+#define LVGL_DRAW_BUF_LINES    20 // number of display lines in each draw buffer
+#define LVGL_TICK_PERIOD_MS    2
+#define LVGL_TASK_MAX_DELAY_MS 500
+#define LVGL_TASK_MIN_DELAY_MS 1
+#define LVGL_TASK_STACK_SIZE   (4 * 1024)
+#define LVGL_TASK_PRIORITY     2
 
 // LVGL library is not thread-safe, this example will call LVGL APIs from different tasks, so use a mutex to protect it
 static _lock_t lvgl_api_lock;
@@ -79,6 +79,12 @@ extern void list_sub_menu(lv_display_t *disp);
 extern void ledWall_sub_menu(lv_display_t *disp);
 extern void change_slider_value_CW(int32_t new_value);
 extern void change_slider_value_WW(int32_t new_value);
+void change_slider_common(int32_t new_value, uint8_t slider /*0=WWB 1=CWB */, bool send /*1-send 0-just change*/);
+
+static lv_display_t *display;
+static lv_obj_t *scr;
+static void setupDisplay(lv_display_t *display);
+static void menuTouchHandler(void);
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
@@ -176,7 +182,7 @@ int32_t ww_val_gui = 100;
 static void example_increase_lvgl_tick(void *arg)
 {
     /* Tell LVGL how many milliseconds has elapsed */
-    lv_tick_inc(EXAMPLE_LVGL_TICK_PERIOD_MS);
+    lv_tick_inc(LVGL_TICK_PERIOD_MS);
 }
 
 static void example_lvgl_port_task(void *arg)
@@ -203,34 +209,134 @@ void app_main(void)
 
     
     ESP_ERROR_CHECK(example_connect());
+
+    mqtt_app_start();
     #pragma endregion
-    #pragma region setupDisplay
+    setupDisplay(display);
+    scr = lv_display_get_screen_active(display);
+    // Lock the mutex due to the LVGL APIs are not thread-safe
+    tp_init_set_thresholds();
+    
+
+    _lock_acquire(&lvgl_api_lock);
+    main_menu_lvgl_ui(display);
+    currentScreen = MAIN_SCREEN;
+    _lock_release(&lvgl_api_lock);
+
+    
+    while(1){
+        //Function Taking care of screen switching etc..
+        menuTouchHandler();        
+        
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+    }
+}
+void change_slider_common(int32_t new_value, uint8_t slider /*0=WWB 1=CWB */, bool send /*1-send 0-just change*/){
+    uint8_t val = (uint8_t) new_value;
+    val =(uint8_t) val * 255.0/100.0;
+    char data[4];
+    sprintf(data,"%d",val);
+    if(slider){
+        change_slider_value_CW(new_value);
+        mqtt_publish(MQTT_CWB_TOPIC, data);
+    }else{
+        change_slider_value_WW(new_value);
+        mqtt_publish(MQTT_WWB_TOPIC, data);
+    }
+
+}
+
+static void menuTouchHandler(void){
+    switch(currentScreen){
+            case MAIN_SCREEN:
+                if(touchPressed[0]) {
+                    touchPressed[0] = false;
+                    currentScreen = LED_WALL_SCREEN;
+                    lv_obj_clean(scr);
+                    _lock_acquire(&lvgl_api_lock);
+                    ledWall_sub_menu(display);
+                    _lock_release(&lvgl_api_lock);
+                }
+                if(touchPressed[2]){
+                    touchPressed[2] = false;
+                    currentScreen = FCN_LIST_SCREEN;
+                    lv_obj_clean(scr);
+                    _lock_acquire(&lvgl_api_lock);
+                    list_sub_menu(display);
+                    _lock_release(&lvgl_api_lock);
+                }
+                
+            break;
+            case LED_WALL_SCREEN:
+                if(touchPressed[0]) {//CW up
+                    touchPressed[0] = false;
+                    if(ww_val_gui<100)ww_val_gui+=5;
+                    change_slider_common(ww_val_gui, 0, true);
+                }
+                if(touchPressed[3]) {//CW Down
+                    touchPressed[3] = false;
+                    if(ww_val_gui>0)ww_val_gui-=5;
+                    change_slider_common(ww_val_gui, 0, true);
+                }
+                if(touchPressed[7]) {//WW up
+                    touchPressed[7] = false;
+                    if(cw_val_gui<100)cw_val_gui+=5;
+                    change_slider_common(cw_val_gui, 1, true);
+                }
+                if(touchPressed[5]) {//WW Down
+                    touchPressed[5] = false;
+                    if(cw_val_gui>0)cw_val_gui-=5;
+                    change_slider_common(cw_val_gui, 1, true);
+                }
+                
+                if(touchPressed[4]) {
+                    touchPressed[4] = false;
+                    lv_obj_clean(scr);
+                    _lock_acquire(&lvgl_api_lock);
+                    main_menu_lvgl_ui(display);
+                    currentScreen = MAIN_SCREEN;
+                    _lock_release(&lvgl_api_lock);
+                }
+            break;
+            default:
+                if(touchPressed[4]) {
+                    touchPressed[4] = false;
+                    lv_obj_clean(scr);
+                    _lock_acquire(&lvgl_api_lock);
+                    main_menu_lvgl_ui(display);
+                    currentScreen = MAIN_SCREEN;
+                    _lock_release(&lvgl_api_lock);
+                }
+            break;
+    }
+}
+static void setupDisplay(lv_display_t *display){
     ESP_LOGI(TAG, "Turn off LCD backlight");
     gpio_config_t bk_gpio_config = {
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT
+        .pin_bit_mask = 1ULL << PIN_NUM_BK_LIGHT
     };
     ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
 
     ESP_LOGI(TAG, "Initialize SPI bus");
     spi_bus_config_t buscfg = {
-        .sclk_io_num = EXAMPLE_PIN_NUM_SCLK,
-        .mosi_io_num = EXAMPLE_PIN_NUM_MOSI,
-        .miso_io_num = EXAMPLE_PIN_NUM_MISO,
+        .sclk_io_num = PIN_NUM_SCLK,
+        .mosi_io_num = PIN_NUM_MOSI,
+        .miso_io_num = PIN_NUM_MISO,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = EXAMPLE_LCD_H_RES * 80 * sizeof(uint16_t),
+        .max_transfer_sz = LCD_H_RES * 80 * sizeof(uint16_t),
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     ESP_LOGI(TAG, "Install panel IO");
     esp_lcd_panel_io_handle_t io_handle = NULL;
     esp_lcd_panel_io_spi_config_t io_config = {
-        .dc_gpio_num = EXAMPLE_PIN_NUM_LCD_DC,
-        .cs_gpio_num = EXAMPLE_PIN_NUM_LCD_CS,
-        .pclk_hz = EXAMPLE_LCD_PIXEL_CLOCK_HZ,
-        .lcd_cmd_bits = EXAMPLE_LCD_CMD_BITS,
-        .lcd_param_bits = EXAMPLE_LCD_PARAM_BITS,
+        .dc_gpio_num = PIN_NUM_LCD_DC,
+        .cs_gpio_num = PIN_NUM_LCD_CS,
+        .pclk_hz = LCD_PIXEL_CLOCK_HZ,
+        .lcd_cmd_bits = LCD_CMD_BITS,
+        .lcd_param_bits = LCD_PARAM_BITS,
         .spi_mode = 0,
         .trans_queue_depth = 10,
     };
@@ -239,7 +345,7 @@ void app_main(void)
 
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = EXAMPLE_PIN_NUM_LCD_RST,
+        .reset_gpio_num = PIN_NUM_LCD_RST,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
         .bits_per_pixel = 16,
     };
@@ -257,17 +363,17 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
 
     ESP_LOGI(TAG, "Turn on LCD backlight");
-    gpio_set_level(EXAMPLE_PIN_NUM_BK_LIGHT, EXAMPLE_LCD_BK_LIGHT_ON_LEVEL);
+    gpio_set_level(PIN_NUM_BK_LIGHT, LCD_BK_LIGHT_ON_LEVEL);
 
     ESP_LOGI(TAG, "Initialize LVGL library");
     lv_init();
 
     // create a lvgl display
-    lv_display_t *display = lv_display_create(EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES);
+    display = lv_display_create(LCD_H_RES, LCD_V_RES);
 
     // alloc draw buffers used by LVGL
     // it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized
-    size_t draw_buffer_sz = EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_DRAW_BUF_LINES * sizeof(lv_color16_t);
+    size_t draw_buffer_sz = LCD_H_RES * LVGL_DRAW_BUF_LINES * sizeof(lv_color16_t);
 
     void *buf1 = spi_bus_dma_memory_alloc(LCD_HOST, draw_buffer_sz, 0);
     assert(buf1);
@@ -290,7 +396,7 @@ void app_main(void)
     };
     esp_timer_handle_t lvgl_tick_timer = NULL;
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, LVGL_TICK_PERIOD_MS * 1000));
 
     ESP_LOGI(TAG, "Register io panel event callback for LVGL flush ready notification");
     const esp_lcd_panel_io_callbacks_t cbs = {
@@ -302,90 +408,10 @@ void app_main(void)
 
 
     ESP_LOGI(TAG, "Create LVGL task");
-    xTaskCreate(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE*2, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
+    xTaskCreate(example_lvgl_port_task, "LVGL", LVGL_TASK_STACK_SIZE*2, NULL, LVGL_TASK_PRIORITY, NULL);
 
     ESP_LOGI(TAG, "Display LVGL Meter Widget");
-    lv_obj_t *scr = lv_display_get_screen_active(display);
-    #pragma endregion
-    // Lock the mutex due to the LVGL APIs are not thread-safe
-    #pragma region setupTouch
-    tp_init_set_thresholds();
     
-
-    #pragma endregion
-    _lock_acquire(&lvgl_api_lock);
-    main_menu_lvgl_ui(display);
-    currentScreen = MAIN_SCREEN;
-    _lock_release(&lvgl_api_lock);
-
-    
-    while(1){
-        switch(currentScreen){
-            case MAIN_SCREEN:
-                if(touchPressed[0]) {
-                    touchPressed[0] = false;
-                    lv_obj_clean(scr);
-                    _lock_acquire(&lvgl_api_lock);
-                    ledWall_sub_menu(display);
-                    currentScreen = LED_WALL_SCREEN;
-                    _lock_release(&lvgl_api_lock);
-                }
-                if(touchPressed[2]){
-                    touchPressed[2] = false;
-                    lv_obj_clean(scr);
-                    _lock_acquire(&lvgl_api_lock);
-                    list_sub_menu(display);
-                    currentScreen = FCN_LIST_SCREEN;
-                    _lock_release(&lvgl_api_lock);
-                }
-            break;
-            case LED_WALL_SCREEN:
-                if(touchPressed[0]) {//CW up
-                    touchPressed[0] = false;
-                    if(ww_val_gui<100)ww_val_gui+=5;
-                    change_slider_value_WW(ww_val_gui);
-                }
-                if(touchPressed[3]) {//CW Down
-                    touchPressed[3] = false;
-                    if(ww_val_gui>0)ww_val_gui-=5;
-                    change_slider_value_WW(ww_val_gui);
-                }
-                if(touchPressed[7]) {//WW up
-                    touchPressed[7] = false;
-                    if(cw_val_gui<100)cw_val_gui+=5;
-                    change_slider_value_CW(cw_val_gui);
-                }
-                if(touchPressed[5]) {//WW Down
-                    touchPressed[5] = false;
-                    if(cw_val_gui>0)cw_val_gui-=5;
-                    change_slider_value_CW(cw_val_gui);
-                }
-                
-                if(touchPressed[4]) {
-                    touchPressed[4] = false;
-                    lv_obj_clean(scr);
-                    _lock_acquire(&lvgl_api_lock);
-                    main_menu_lvgl_ui(display);
-                    currentScreen = MAIN_SCREEN;
-                    _lock_release(&lvgl_api_lock);
-                }
-            break;
-            default:
-                if(touchPressed[4]) {
-                    touchPressed[4] = false;
-                    lv_obj_clean(scr);
-                    _lock_acquire(&lvgl_api_lock);
-                    main_menu_lvgl_ui(display);
-                    currentScreen = MAIN_SCREEN;
-                    _lock_release(&lvgl_api_lock);
-                }
-            break;
-        }
-
-
-
-        vTaskDelay(200 / portTICK_PERIOD_MS);
-    }
 }
 
 
@@ -437,41 +463,3 @@ static void tp_init_set_thresholds(void)
     
 }
 
-// static void mqtt_event_handler(esp_mqtt_event_handle_t event){ //here esp_mqtt_event_handle_t is a struct which receieves struct event from mqtt app start funtion
-// esp_mqtt_client_handle_t client = event->client //making obj client of struct esp_mqtt_client_handle_t and assigning it the receieved event client
-//   if(event->event_id == MQTT_EVENT_CONNECTED){
-//   ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
-//   esp_mqtt_client_subscribe(client,"your topic",0); //in mqtt we require a topic to subscribe and client is from event client and 0 is quality of service it can be 1 or 2
-//   ESP_LOGI(TAG3, "sent subscribe successful" );
-//   }
-//   else if(event->event_id == MQTT_EVENT_DISCONNECTED)
-//   {
-//     ESP_LOGI(TAG3, "MQTT_EVENT_DISCONNECTED"); //if disconnected
-//   }
-//   else if(event->event_id == MQTT_EVENT_SUBSCRIBED)
-//   {
-//      ESP_LOGI(TAG3, "MQTT_EVENT_SUBSCRIBED");
-//   }
-//   else if(event->event_id == MQTT_EVENT_UNSUBSCRIBED) //when subscribed
-//   {
-//      ESP_LOGI(TAG3, "MQTT_EVENT_UNSUBSCRIBED");
-//   }
-//   else if(event->event_id == MQTT_EVENT_DATA)//when unsubscribed
-//   {
-//      ESP_LOGI(TAG3, "MQTT_EVENT_DATA");
-//   }
-//   else if(event->event_id == MQTT_EVENT_ERROR)//when any error
-//   {
-//      ESP_LOGI(TAG3, "MQTT_EVENT_ERROR");
-//   }
-// }
-
-// static void mqtt_initialize(void)
-// {
-//   const esp_mqtt_client_config_t mqtt_cfg={
-//     .uri="mqtt://io.adafruit.com", 
-//     .event_handle=mqtt_event_handler, 
-//   };
-//   esp_mqtt_client_handle_t client=esp_mqtt_client_init(&mqtt_cfg); //sending struct as a parameter in init client function
-//   esp_mqtt_client_start(client); //starting the process
-// }
