@@ -79,6 +79,12 @@ extern void list_sub_menu(lv_display_t *disp);
 extern void ledWall_sub_menu(lv_display_t *disp);
 extern void change_slider_value_CW(int32_t new_value);
 extern void change_slider_value_WW(int32_t new_value);
+void change_slider_common(int32_t new_value, uint8_t slider /*0=WWB 1=CWB */, bool send /*1-send 0-just change*/);
+
+static lv_display_t *display;
+static lv_obj_t *scr;
+static void setupDisplay(lv_display_t *display);
+static void menuTouchHandler(void);
 
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
@@ -206,7 +212,105 @@ void app_main(void)
 
     mqtt_app_start();
     #pragma endregion
-    #pragma region setupDisplay
+    setupDisplay(display);
+    scr = lv_display_get_screen_active(display);
+    // Lock the mutex due to the LVGL APIs are not thread-safe
+    tp_init_set_thresholds();
+    
+
+    _lock_acquire(&lvgl_api_lock);
+    main_menu_lvgl_ui(display);
+    currentScreen = MAIN_SCREEN;
+    _lock_release(&lvgl_api_lock);
+
+    
+    while(1){
+        //Function Taking care of screen switching etc..
+        menuTouchHandler();        
+        
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+    }
+}
+void change_slider_common(int32_t new_value, uint8_t slider /*0=WWB 1=CWB */, bool send /*1-send 0-just change*/){
+    uint8_t val = (uint8_t) new_value;
+    val =(uint8_t) val * 255.0/100.0;
+    char data[4];
+    sprintf(data,"%d",val);
+    if(slider){
+        change_slider_value_CW(new_value);
+        mqtt_publish(MQTT_CWB_TOPIC, data);
+    }else{
+        change_slider_value_WW(new_value);
+        mqtt_publish(MQTT_WWB_TOPIC, data);
+    }
+
+}
+
+static void menuTouchHandler(void){
+    switch(currentScreen){
+            case MAIN_SCREEN:
+                if(touchPressed[0]) {
+                    touchPressed[0] = false;
+                    currentScreen = LED_WALL_SCREEN;
+                    lv_obj_clean(scr);
+                    _lock_acquire(&lvgl_api_lock);
+                    ledWall_sub_menu(display);
+                    _lock_release(&lvgl_api_lock);
+                }
+                if(touchPressed[2]){
+                    touchPressed[2] = false;
+                    currentScreen = FCN_LIST_SCREEN;
+                    lv_obj_clean(scr);
+                    _lock_acquire(&lvgl_api_lock);
+                    list_sub_menu(display);
+                    _lock_release(&lvgl_api_lock);
+                }
+                
+            break;
+            case LED_WALL_SCREEN:
+                if(touchPressed[0]) {//CW up
+                    touchPressed[0] = false;
+                    if(ww_val_gui<100)ww_val_gui+=5;
+                    change_slider_common(ww_val_gui, 0, true);
+                }
+                if(touchPressed[3]) {//CW Down
+                    touchPressed[3] = false;
+                    if(ww_val_gui>0)ww_val_gui-=5;
+                    change_slider_common(ww_val_gui, 0, true);
+                }
+                if(touchPressed[7]) {//WW up
+                    touchPressed[7] = false;
+                    if(cw_val_gui<100)cw_val_gui+=5;
+                    change_slider_common(cw_val_gui, 1, true);
+                }
+                if(touchPressed[5]) {//WW Down
+                    touchPressed[5] = false;
+                    if(cw_val_gui>0)cw_val_gui-=5;
+                    change_slider_common(cw_val_gui, 1, true);
+                }
+                
+                if(touchPressed[4]) {
+                    touchPressed[4] = false;
+                    lv_obj_clean(scr);
+                    _lock_acquire(&lvgl_api_lock);
+                    main_menu_lvgl_ui(display);
+                    currentScreen = MAIN_SCREEN;
+                    _lock_release(&lvgl_api_lock);
+                }
+            break;
+            default:
+                if(touchPressed[4]) {
+                    touchPressed[4] = false;
+                    lv_obj_clean(scr);
+                    _lock_acquire(&lvgl_api_lock);
+                    main_menu_lvgl_ui(display);
+                    currentScreen = MAIN_SCREEN;
+                    _lock_release(&lvgl_api_lock);
+                }
+            break;
+    }
+}
+static void setupDisplay(lv_display_t *display){
     ESP_LOGI(TAG, "Turn off LCD backlight");
     gpio_config_t bk_gpio_config = {
         .mode = GPIO_MODE_OUTPUT,
@@ -265,7 +369,7 @@ void app_main(void)
     lv_init();
 
     // create a lvgl display
-    lv_display_t *display = lv_display_create(LCD_H_RES, LCD_V_RES);
+    display = lv_display_create(LCD_H_RES, LCD_V_RES);
 
     // alloc draw buffers used by LVGL
     // it's recommended to choose the size of the draw buffer(s) to be at least 1/10 screen sized
@@ -307,87 +411,7 @@ void app_main(void)
     xTaskCreate(example_lvgl_port_task, "LVGL", LVGL_TASK_STACK_SIZE*2, NULL, LVGL_TASK_PRIORITY, NULL);
 
     ESP_LOGI(TAG, "Display LVGL Meter Widget");
-    lv_obj_t *scr = lv_display_get_screen_active(display);
-    #pragma endregion
-    // Lock the mutex due to the LVGL APIs are not thread-safe
-    #pragma region setupTouch
-    tp_init_set_thresholds();
     
-
-    #pragma endregion
-    _lock_acquire(&lvgl_api_lock);
-    main_menu_lvgl_ui(display);
-    currentScreen = MAIN_SCREEN;
-    _lock_release(&lvgl_api_lock);
-
-    
-    while(1){
-        switch(currentScreen){
-            case MAIN_SCREEN:
-                if(touchPressed[0]) {
-                    touchPressed[0] = false;
-                    lv_obj_clean(scr);
-                    _lock_acquire(&lvgl_api_lock);
-                    ledWall_sub_menu(display);
-                    currentScreen = LED_WALL_SCREEN;
-                    _lock_release(&lvgl_api_lock);
-                }
-                if(touchPressed[2]){
-                    touchPressed[2] = false;
-                    lv_obj_clean(scr);
-                    _lock_acquire(&lvgl_api_lock);
-                    list_sub_menu(display);
-                    currentScreen = FCN_LIST_SCREEN;
-                    _lock_release(&lvgl_api_lock);
-                }
-            break;
-            case LED_WALL_SCREEN:
-                if(touchPressed[0]) {//CW up
-                    touchPressed[0] = false;
-                    if(ww_val_gui<100)ww_val_gui+=5;
-                    change_slider_value_WW(ww_val_gui);
-                }
-                if(touchPressed[3]) {//CW Down
-                    touchPressed[3] = false;
-                    if(ww_val_gui>0)ww_val_gui-=5;
-                    change_slider_value_WW(ww_val_gui);
-                }
-                if(touchPressed[7]) {//WW up
-                    touchPressed[7] = false;
-                    if(cw_val_gui<100)cw_val_gui+=5;
-                    change_slider_value_CW(cw_val_gui);
-                }
-                if(touchPressed[5]) {//WW Down
-                    touchPressed[5] = false;
-                    if(cw_val_gui>0)cw_val_gui-=5;
-                    change_slider_value_CW(cw_val_gui);
-                }
-                
-                if(touchPressed[4]) {
-                    touchPressed[4] = false;
-                    lv_obj_clean(scr);
-                    _lock_acquire(&lvgl_api_lock);
-                    main_menu_lvgl_ui(display);
-                    currentScreen = MAIN_SCREEN;
-                    _lock_release(&lvgl_api_lock);
-                }
-            break;
-            default:
-                if(touchPressed[4]) {
-                    touchPressed[4] = false;
-                    lv_obj_clean(scr);
-                    _lock_acquire(&lvgl_api_lock);
-                    main_menu_lvgl_ui(display);
-                    currentScreen = MAIN_SCREEN;
-                    _lock_release(&lvgl_api_lock);
-                }
-            break;
-        }
-
-
-
-        vTaskDelay(200 / portTICK_PERIOD_MS);
-    }
 }
 
 
