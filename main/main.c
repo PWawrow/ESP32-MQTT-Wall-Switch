@@ -22,10 +22,18 @@
 #include "driver/gpio.h"
 #include "driver/adc.h"
 #include "driver/touch_pad.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "mqtt_client.h"
+
+#include "protocol_examples_common.h"
+#include "esp_wifi.h"
 
 
 #include "esp_lcd_gc9a01.h"
-static const char *TAG = "example";
+static const char *TAG = "MQTT WALL SWITCH";
 static const char *TOUCH_TAG = "Touch";
 #pragma region DisplayDefines
 
@@ -48,14 +56,10 @@ static const char *TOUCH_TAG = "Touch";
 #define EXAMPLE_PIN_NUM_BK_LIGHT       22
 #define EXAMPLE_PIN_NUM_TOUCH_CS       5
 
-// The pixel number in horizontal and vertical
-#if CONFIG_EXAMPLE_LCD_CONTROLLER_ILI9341
-#define EXAMPLE_LCD_H_RES              240
-#define EXAMPLE_LCD_V_RES              320
-#elif CONFIG_EXAMPLE_LCD_CONTROLLER_GC9A01
+
 #define EXAMPLE_LCD_H_RES              240
 #define EXAMPLE_LCD_V_RES              240
-#endif
+
 // Bit number used to represent command and parameter
 #define EXAMPLE_LCD_CMD_BITS           8
 #define EXAMPLE_LCD_PARAM_BITS         8
@@ -126,7 +130,7 @@ static void example_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uin
     // copy a buffer's content to a specific area of the display
     esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
 }
-
+static void mqtt_event_handler(esp_mqtt_event_handle_t event);
 #pragma endregion
 
 #pragma region TouchDefines
@@ -197,10 +201,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
-     * Read "Establishing Wi-Fi or Ethernet Connection" section in
-     * examples/protocols/README.md for more information about this function.
-     */
+    
     ESP_ERROR_CHECK(example_connect());
     #pragma endregion
     #pragma region setupDisplay
@@ -435,3 +436,42 @@ static void tp_init_set_thresholds(void)
 
     
 }
+
+// static void mqtt_event_handler(esp_mqtt_event_handle_t event){ //here esp_mqtt_event_handle_t is a struct which receieves struct event from mqtt app start funtion
+// esp_mqtt_client_handle_t client = event->client //making obj client of struct esp_mqtt_client_handle_t and assigning it the receieved event client
+//   if(event->event_id == MQTT_EVENT_CONNECTED){
+//   ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+//   esp_mqtt_client_subscribe(client,"your topic",0); //in mqtt we require a topic to subscribe and client is from event client and 0 is quality of service it can be 1 or 2
+//   ESP_LOGI(TAG3, "sent subscribe successful" );
+//   }
+//   else if(event->event_id == MQTT_EVENT_DISCONNECTED)
+//   {
+//     ESP_LOGI(TAG3, "MQTT_EVENT_DISCONNECTED"); //if disconnected
+//   }
+//   else if(event->event_id == MQTT_EVENT_SUBSCRIBED)
+//   {
+//      ESP_LOGI(TAG3, "MQTT_EVENT_SUBSCRIBED");
+//   }
+//   else if(event->event_id == MQTT_EVENT_UNSUBSCRIBED) //when subscribed
+//   {
+//      ESP_LOGI(TAG3, "MQTT_EVENT_UNSUBSCRIBED");
+//   }
+//   else if(event->event_id == MQTT_EVENT_DATA)//when unsubscribed
+//   {
+//      ESP_LOGI(TAG3, "MQTT_EVENT_DATA");
+//   }
+//   else if(event->event_id == MQTT_EVENT_ERROR)//when any error
+//   {
+//      ESP_LOGI(TAG3, "MQTT_EVENT_ERROR");
+//   }
+// }
+
+// static void mqtt_initialize(void)
+// {
+//   const esp_mqtt_client_config_t mqtt_cfg={
+//     .uri="mqtt://io.adafruit.com", 
+//     .event_handle=mqtt_event_handler, 
+//   };
+//   esp_mqtt_client_handle_t client=esp_mqtt_client_init(&mqtt_cfg); //sending struct as a parameter in init client function
+//   esp_mqtt_client_start(client); //starting the process
+// }

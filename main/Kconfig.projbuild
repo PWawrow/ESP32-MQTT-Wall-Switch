@@ -31,5 +31,10 @@ menu "Example Configuration"
             help
                 Touch controller STMPE610 connected via SPI.
     endchoice
-
+    config SSID
+        string "SSID"
+        default "mypass"
+    config PASSWORD
+        string "PASSWORD"
+        default "test"
 endmenu
